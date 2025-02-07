@@ -33,6 +33,7 @@ project(comedouro C CXX ASM)
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
+add_subdirectory(dht)
 # Add executable. Default name is the project name, version 0.1
 
 add_executable(comedouro comedouro.c )
@@ -44,10 +45,6 @@ pico_set_program_version(comedouro "0.1")
 pico_enable_stdio_uart(comedouro 0)
 pico_enable_stdio_usb(comedouro 1)
 
-# Add the standard library to the build
-target_link_libraries(comedouro
-        pico_stdlib)
-
 # Add the standard include files to the build
 target_include_directories(comedouro PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
@@ -58,6 +55,8 @@ target_link_libraries(comedouro
         pico_cyw43_arch_lwip_threadsafe_background
         pico_stdlib
         hardware_adc
+        hardware_pwm
+        dht
     )
 
 pico_add_extra_outputs(comedouro)
