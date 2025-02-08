@@ -47,7 +47,7 @@ pico_enable_stdio_usb(comedouro 1)
 
 # Add the standard include files to the build
 target_include_directories(comedouro PRIVATE
-        ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_LIST_DIR}/include
 )
 
 # Add any user requested libraries
@@ -55,7 +55,14 @@ target_link_libraries(comedouro
         pico_cyw43_arch_lwip_threadsafe_background
         pico_stdlib
         hardware_adc
+        hardware_clocks
+        hardware_dma
+        hardware_gpio
         hardware_pwm
+        hardware_timer
+        pico_platform
+        pico_sync
+        pico_time
         dht
     )
 
