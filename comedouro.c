@@ -9,6 +9,30 @@
 #include "lwip/netif.h"
 #include "lwipopts.h"
 #include "dht.h" // Include DHT11 library
+#include "tusb.h"
+#include "common.h"
+#include "hx711.h"
+
+#define PRINT_ARR(arr, len)                                                                    \
+  do {                                                                                         \
+    for (size_t i = 0; i < len; ++i) {                                                         \
+      printf("hx711_multi_t chip %i: %li\n", i, arr[i]);                                      \
+    }                                                                                          \
+  } while (0)
+
+// Calibration values (adjust these based on your load cell and setup)
+float LOAD_CELL_ZERO_OFFSET = 0.0f; // Value when there's no weight
+float LOAD_CELL_SCALE_FACTOR = 1.0f; // Adjust this to convert readings to grams
+
+// HX711 pins (adjust if needed)
+#define HX711_CLOCK_PIN 14
+#define HX711_DATA_PIN 15
+
+// Number of readings for averaging during calibration
+#define NUM_CALIBRATION_READINGS 10
+
+// Known weight for calibration (in grams)
+#define KNOWN_WEIGHT 400.0f
 
 // HC-SR04 Sensor Pins
 #define TRIGGER_PIN 17
@@ -37,6 +61,9 @@ void set_servo_angle(float angle);
 void setup();
 bool connect_to_wifi();
 void print_ip_address();
+float read_weight(hx711_t *hx);
+void tare_scale(hx711_t *hx);
+void calibrate_scale_factor(hx711_t *hx);
 
 // DHT11 Sensor Configuration
 static const dht_model_t DHT_MODEL = DHT11;
@@ -73,6 +100,43 @@ void print_ip_address() {
     } else {
         printf("No network interface found.\n");
     }
+}
+
+// Function to read the weight and apply calibration
+float read_weight(hx711_t *hx) {
+  int32_t raw_value = hx711_get_value(hx);
+  printf("Raw Value: %ld\n", raw_value); // Imprime o valor bruto
+  float weight = (((float)(raw_value - LOAD_CELL_ZERO_OFFSET) / LOAD_CELL_SCALE_FACTOR) / 2.0) - KNOWN_WEIGHT;
+  return weight;
+}
+
+// Function to perform tare calibration
+void tare_scale(hx711_t *hx) {
+  printf("Taring scale. Remove all weight.\n");
+  sleep_ms(3000); // Give time to remove weight
+  int32_t zero_sum = 0;
+  for (int i = 0; i < NUM_CALIBRATION_READINGS; ++i) {
+    zero_sum += hx711_get_value(hx);
+    sleep_ms(50);
+  }
+  LOAD_CELL_ZERO_OFFSET = (float)zero_sum / NUM_CALIBRATION_READINGS; // Get the average
+  printf("New zero offset: %f\n", LOAD_CELL_ZERO_OFFSET);
+}
+
+// Function to perform scale factor calibration
+void calibrate_scale_factor(hx711_t *hx) {
+  printf("Place a known weight (%f g) on the load cell.\n", KNOWN_WEIGHT);
+  sleep_ms(5000); // Give time to place weight
+
+  int32_t weight_sum = 0;
+  for (int i = 0; i < NUM_CALIBRATION_READINGS; ++i) {
+    weight_sum += hx711_get_value(hx);
+    sleep_ms(50);
+  }
+  float weighted_value = (float)weight_sum / NUM_CALIBRATION_READINGS;
+
+  LOAD_CELL_SCALE_FACTOR = (weighted_value - LOAD_CELL_ZERO_OFFSET) / KNOWN_WEIGHT;
+  printf("New scale factor: %f\n", LOAD_CELL_SCALE_FACTOR);
 }
 
 // Function to setup hardware
@@ -149,6 +213,35 @@ int main() {
     // Get and print the IP address
     print_ip_address();
 
+    while (!tud_cdc_connected()) {
+        sleep_ms(1);
+    }
+
+    printf("HX711 Balanca - Raspberry Pi Pico\n");
+
+    hx711_config_t hxcfg;
+    hx711_get_default_config(&hxcfg);
+
+    hxcfg.clock_pin = HX711_CLOCK_PIN;
+    hxcfg.data_pin = HX711_DATA_PIN;
+
+    hx711_t hx;
+
+    // 1. Initialise
+    hx711_init(&hx, &hxcfg);
+
+    // 2. Power up the hx711 and set gain on chip
+    hx711_power_up(&hx, hx711_gain_128);
+
+    // 4. Wait for readings to settle
+    hx711_wait_settle(hx711_rate_80);
+
+    // Calibrate the scale
+    tare_scale(&hx);
+    calibrate_scale_factor(&hx);
+
+    printf("Ready to measure weight!\n");
+
     setup(); // Initialize GPIO and PWM
 
     servo_state current_servo_state = SERVO_0_DEG;
@@ -162,6 +255,15 @@ int main() {
     dht_init(&dht, DHT_MODEL, pio0, DHT_DATA_PIN, true /* pull_up */);
 
     while (true) {
+        // Read the weight
+        float weight = read_weight(&hx);
+
+        // Print the weight to the serial console
+         printf("Weight: %.2f g\n", weight); // Adjust unit as needed
+
+        // Small delay
+        sleep_ms(100);
+
         float distance = get_distance_cm();
         printf("Distance: %.2f cm\n", distance);
 

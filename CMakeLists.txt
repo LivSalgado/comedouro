@@ -36,7 +36,7 @@ pico_sdk_init()
 add_subdirectory(dht)
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(comedouro comedouro.c )
+add_executable(comedouro comedouro.c hx711.c util.c common.c)
 
 pico_set_program_name(comedouro "comedouro")
 pico_set_program_version(comedouro "0.1")
