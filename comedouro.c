@@ -21,7 +21,7 @@
   } while (0)
 
 // Calibration values (adjust these based on your load cell and setup)
-float LOAD_CELL_ZERO_OFFSET = 0.0f; // Value when there's no weight
+float LOAD_CELL_ZERO_OFFSET = 394222; // Value when there's no weight
 float LOAD_CELL_SCALE_FACTOR = 1.0f; // Adjust this to convert readings to grams
 
 // HX711 pins (adjust if needed)
@@ -37,6 +37,7 @@ float LOAD_CELL_SCALE_FACTOR = 1.0f; // Adjust this to convert readings to grams
 // HC-SR04 Sensor Pins
 #define TRIGGER_PIN 17
 #define ECHO_PIN 16
+
 
 // Servo Pins and Configuration
 #define SERVO_PIN 19
