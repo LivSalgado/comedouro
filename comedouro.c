@@ -8,6 +8,10 @@
 #include "lwip/ip4_addr.h"
 #include "lwip/netif.h"
 #include "lwipopts.h"
+#include "lwip/tcp.h"
+#include "lwip/dns.h"
+#include "lwip/pbuf.h"
+#include "lwip/err.h" // Inclui definições de erros do lwIP
 #include "dht.h" // Include DHT11 library
 #include "tusb.h"
 #include "common.h"
@@ -21,7 +25,7 @@
   } while (0)
 
 // Calibration values (adjust these based on your load cell and setup)
-float LOAD_CELL_ZERO_OFFSET = 394222; // Value when there's no weight
+float LOAD_CELL_ZERO_OFFSET = 0.0f; // Value when there's no weight
 float LOAD_CELL_SCALE_FACTOR = 1.0f; // Adjust this to convert readings to grams
 
 // HX711 pins (adjust if needed)
@@ -37,7 +41,6 @@ float LOAD_CELL_SCALE_FACTOR = 1.0f; // Adjust this to convert readings to grams
 // HC-SR04 Sensor Pins
 #define TRIGGER_PIN 17
 #define ECHO_PIN 16
-
 
 // Servo Pins and Configuration
 #define SERVO_PIN 19
@@ -55,11 +58,41 @@ typedef enum {
     SERVO_180_DEG
 } servo_state;
 
+// --- Configurações ---
+#define WIFI_SSID "IJKL_QUARTOS"
+#define WIFI_PASSWORD "31290304"
+#define API_HOST "192.168.0.29"
+#define API_PORT 5000
+#define API_ENDPOINT "/dados"
+#define CONNECTION_TIMEOUT_MS 10000 // Timeout para a conexão TCP
+#define RETRY_INTERVAL_MS 5000 // Intervalo entre tentativas de reconexão
+#define DNS_TIMEOUT_MS 5000 // Timeout para a resolução DNS
+
+// --- Estrutura para dados do cliente ---
+typedef struct {
+    struct tcp_pcb *pcb;
+    bool connected;
+    bool request_sent;
+    ip_addr_t server_ip; // Armazena o IP do servidor
+    char post_data[256];
+    char request_buffer[512];
+} ClientData;
+
+static ClientData client_data = {NULL, false, false, {0}, "", ""}; // Inicializa a estrutura
+
 // Function declarations
 uint64_t get_pulse_duration();
 float get_distance_cm();
 void set_servo_angle(float angle);
 void setup();
+static err_t tcp_client_connected(void *arg, struct tcp_pcb *tpcb, err_t err);
+static err_t tcp_client_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err);
+static void tcp_client_err(void *arg, err_t err);
+static err_t send_post_request(ClientData *client);
+static void connect_to_server(ClientData *client);
+static void dns_callback(const char *name, const ip_addr_t *ipaddr, void *callback_arg);
+static bool resolve_dns(ClientData *client);
+static void close_connection(ClientData *client);
 bool connect_to_wifi();
 void print_ip_address();
 float read_weight(hx711_t *hx);
@@ -100,6 +133,162 @@ void print_ip_address() {
         printf("IP Address: %s\n", ip4addr_ntoa(ip4)); // Print the IP address
     } else {
         printf("No network interface found.\n");
+    }
+}
+
+// --- Callback para resolução DNS assíncrona ---
+static void dns_callback(const char *name, const ip_addr_t *ipaddr, void *callback_arg) {
+    ClientData *client = (ClientData *)callback_arg;
+
+    if (ipaddr != NULL) {
+        client->server_ip = *ipaddr;
+        printf("Endereço IP resolvido: %s\n", ipaddr_ntoa(ipaddr));
+        // Agora que temos o IP, podemos conectar
+        connect_to_server(client);
+    } else {
+        printf("Falha na resolução DNS.\n");
+        close_connection(client); // Fecha qualquer conexão existente
+    }
+}
+
+// --- Função para resolver o DNS (agora assíncrona) ---
+static bool resolve_dns(ClientData *client) {
+    client->server_ip.addr = 0; // Reseta o IP
+    err_t dns_err = dns_gethostbyname(API_HOST, &client->server_ip, dns_callback, client);
+
+    if (dns_err == ERR_OK) {
+        // IP já resolvido (improvável, mas possível)
+        printf("Endereço IP já resolvido (cache).\n");
+        return true;
+    } else if (dns_err == ERR_INPROGRESS) {
+        // Resolução em andamento.  Esperar no loop principal.
+        printf("Resolução DNS em andamento...\n");
+        return false;
+    } else {
+        printf("Falha na resolução DNS: %d\n", dns_err);
+        return false;
+    }
+}
+
+// --- Função para fechar a conexão TCP ---
+static void close_connection(ClientData *client) {
+    if (client->pcb) {
+        tcp_arg(client->pcb, NULL);
+        tcp_recv(client->pcb, NULL);
+        tcp_err(client->pcb, NULL);
+        tcp_close(client->pcb);
+        client->pcb = NULL;
+    }
+    client->connected = false;
+    client->request_sent = false;
+}
+
+// --- Callbacks lwIP (agora usando a estrutura ClientData) ---
+
+static err_t tcp_client_connected(void *arg, struct tcp_pcb *tpcb, err_t err) {
+    ClientData *client = (ClientData *)arg;
+
+    if (err == ERR_OK) {
+        printf("Conectado ao servidor!\n");
+        client->connected = true;
+        client->pcb = tpcb; // Atualiza o PCB na estrutura
+        return send_post_request(client); // Envia o request imediatamente após conectar
+    } else {
+        printf("Erro ao conectar: %d\n", err);
+        close_connection(client);
+        return err;
+    }
+}
+
+static err_t tcp_client_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
+    ClientData *client = (ClientData *)arg;
+
+    if (err == ERR_OK && p != NULL) {
+        printf("Resposta recebida:\n");
+        char *data = (char *)p->payload;
+        for (int i = 0; i < p->len; i++) {
+            putchar(data[i]);
+        }
+        printf("\n");
+
+        tcp_recved(tpcb, p->len);
+        pbuf_free(p);
+        close_connection(client); // Fecha após receber a resposta
+    } else if (p == NULL) {
+        printf("Servidor fechou a conexão.\n");
+        close_connection(client);
+    } else {
+        printf("Erro ao receber dados: %d\n", err);
+        if (p != NULL) {
+            pbuf_free(p);
+        }
+        close_connection(client);
+    }
+    return ERR_OK;
+}
+
+static void tcp_client_err(void *arg, err_t err) {
+    ClientData *client = (ClientData *)arg;
+    printf("Erro TCP: %d\n", err);
+    close_connection(client);
+}
+
+// --- Função para enviar a requisição POST (agora usando ClientData) ---
+static err_t send_post_request(ClientData *client) {
+    if (!client->connected || client->pcb == NULL) {
+        printf("Não conectado para enviar a requisição.\n");
+        return ERR_CONN;
+    }
+
+    snprintf(client->request_buffer, sizeof(client->request_buffer),
+             "POST %s HTTP/1.1\r\n"
+             "Host: %s:%d\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: %d\r\n"
+             "Connection: close\r\n"
+             "\r\n"
+             "%s",
+             API_ENDPOINT, API_HOST, API_PORT, (int)strlen(client->post_data), client->post_data);
+
+    err_t err = tcp_write(client->pcb, client->request_buffer, strlen(client->request_buffer), TCP_WRITE_FLAG_COPY);
+    if (err != ERR_OK) {
+        printf("Erro ao enviar dados: %d\n", err);
+        close_connection(client); // Fecha em caso de erro
+        return err;
+    }
+
+    err = tcp_output(client->pcb);
+    if (err != ERR_OK) {
+        printf("Erro tcp_output: %d\n", err);
+        close_connection(client); // Fecha em caso de erro
+        return err;
+    }
+    client->request_sent = true;
+    return ERR_OK;
+}
+
+// --- Função para conectar ao servidor (agora usando ClientData) ---
+static void connect_to_server(ClientData *client) {
+    if (client->pcb != NULL) {
+        // Já existe uma conexão (ou tentativa), não faz nada
+        return;
+    }
+
+    client->pcb = tcp_new();
+    if (client->pcb == NULL) {
+        printf("Erro ao criar PCB\n");
+        return;
+    }
+
+    tcp_arg(client->pcb, client); // Passa a estrutura ClientData para os callbacks
+    tcp_err(client->pcb, tcp_client_err);
+    tcp_recv(client->pcb, tcp_client_recv);
+
+    // Usa o IP resolvido
+    err_t err = tcp_connect(client->pcb, &client->server_ip, API_PORT, tcp_client_connected);
+    if (err != ERR_OK) {
+        printf("Erro ao iniciar a conexão: %d\n", err);
+        close_connection(client);
     }
 }
 
@@ -249,11 +438,13 @@ int main() {
     set_servo_angle(0); // Start at the 0 degree position
 
     uint64_t object_detected_time = 0; // Timestamp of when the object was detected
-    const uint32_t return_delay_ms = 120000; // 1 minute delay in milliseconds
+    const uint32_t return_delay_ms = 2000; // 1 minute delay in milliseconds
 
     // Initialize DHT11 sensor
     dht_t dht;
     dht_init(&dht, DHT_MODEL, pio0, DHT_DATA_PIN, true /* pull_up */);
+
+    uint32_t last_retry_time = 0; // Controla o tempo da última tentativa
 
     while (true) {
         // Read the weight
@@ -282,7 +473,7 @@ int main() {
             printf("Bad DHT checksum\n");
         }
 
-        if (distance > CLOSE_DISTANCE) {
+        if (distance < CLOSE_DISTANCE) {
             if (current_servo_state != SERVO_180_DEG) {
                 set_servo_angle(180);
                 current_servo_state = SERVO_180_DEG;
@@ -301,7 +492,56 @@ int main() {
         sleep_ms(500);
         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
         sleep_ms(500); // Take readings more frequently
-    }
 
+        // Prepara os dados para o POST
+        snprintf(client_data.post_data, sizeof(client_data.post_data),
+                 "{\"weight\": %.2f, \"temperature\": %.1f, \"humidity\": %.1f}",
+                 weight, temperature_c, humidity);
+
+        if (!client_data.connected) {
+            // Tenta resolver o DNS e conectar (assíncrono)
+            if (client_data.server_ip.addr == 0) { // Se o IP ainda não foi resolvido
+                if (!resolve_dns(&client_data)) {
+                    // Espera a resolução DNS, ou um timeout
+                    uint32_t start_time = time_us_32();
+                    while(client_data.server_ip.addr == 0 && (time_us_32() - start_time < DNS_TIMEOUT_MS * 1000)) {
+                        cyw43_arch_poll();
+                        sleep_ms(10);
+                    }
+                    if(client_data.server_ip.addr == 0){
+                        printf("Timeout na resolução DNS.\n");
+                        // Tratar o timeout (tentar novamente, por exemplo)
+                        if (time_us_32() - last_retry_time > RETRY_INTERVAL_MS * 1000) {
+                            printf("Tentando novamente...\n");
+                            last_retry_time = time_us_32();
+                        }
+                    }
+                }
+            } else {
+                // Se o IP já foi resolvido, tenta conectar
+                connect_to_server(&client_data);
+                 // Adiciona um timeout para a conexão
+                uint32_t start_time = time_us_32();
+                while (!client_data.connected && (time_us_32() - start_time < CONNECTION_TIMEOUT_MS * 1000)) {
+                    cyw43_arch_poll();
+                    sleep_ms(10);
+                }
+                if (!client_data.connected) {
+                    printf("Timeout na conexão TCP.\n");
+                    close_connection(&client_data); // Fecha a conexão em caso de timeout
+                    // Tratar o timeout (tentar novamente, por exemplo)
+                    if (time_us_32() - last_retry_time > RETRY_INTERVAL_MS * 1000) {
+                        printf("Tentando novamente...\n");
+                        last_retry_time = time_us_32();
+                        client_data.server_ip.addr = 0; // Força uma nova resolução DNS
+                    }
+                }
+            }
+        }
+        cyw43_arch_poll();
+        sleep_ms(10);
+
+    }
+    cyw43_arch_deinit();
     return 0;
 }
