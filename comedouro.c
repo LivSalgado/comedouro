@@ -248,7 +248,7 @@ int main() {
     set_servo_angle(0); // Start at the 0 degree position
 
     uint64_t object_detected_time = 0; // Timestamp of when the object was detected
-    const uint32_t return_delay_ms = 60000; // 1 minute delay in milliseconds
+    const uint32_t return_delay_ms = 120000; // 1 minute delay in milliseconds
 
     // Initialize DHT11 sensor
     dht_t dht;
@@ -281,7 +281,7 @@ int main() {
             printf("Bad DHT checksum\n");
         }
 
-        if (distance < CLOSE_DISTANCE) {
+        if (distance > CLOSE_DISTANCE) {
             if (current_servo_state != SERVO_180_DEG) {
                 set_servo_angle(180);
                 current_servo_state = SERVO_180_DEG;
